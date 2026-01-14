@@ -1,0 +1,94 @@
+name: Test the Action
+on:
+  push:
+  pull_request:
+
+env:
+  # Note: this tag must exist already, and a draft release (or non-immutable release) must exist with this tag
+  RELEASE_TAG: 0.0.0
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      # contents:write is required to upload to the release assets
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Delete existing assets
+        run: |
+          assets=$(gh release view ${{ env.RELEASE_TAG }} --json assets --template '{{range .assets}}{{.name}}{{"\n"}}{{end}}')
+          for asset in $assets; do
+            gh release delete-asset ${{ env.RELEASE_TAG }} "$asset" -y
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    runs-on: ${{ matrix.operating-system }}
+    needs: [prepare]
+    strategy:
+      fail-fast: false
+      matrix:
+        operating-system:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - macos-15-intel
+          - macos-latest
+        php-versions:
+#          - 5.6 @todo test ext doesn't currently build on 5.6
+          - 7.0
+          - 7.1
+          - 7.2
+          - 7.3
+          - 7.4
+          - 8.0
+          - 8.1
+          - 8.2
+          - 8.3
+          - 8.4
+        zts-mode:
+          - ts
+          - nts
+    permissions:
+      # contents:write is required to upload to the release assets
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          repository: asgrim/example-pie-extension
+          path: ext
+
+      - name: Move test ext files
+        run: |
+          mv ext/composer.json .
+          mv ext/config.m4 .
+          mv ext/php_example_pie_extension.h .
+          mv ext/zend_example_pie_extension.c .
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-versions }}
+        env:
+          # debug: ${{ matrix.zend-debug }} @todo may not be able to use https://github.com/shivammathur/setup-php/issues/816
+          phpts: ${{ matrix.zts-mode }}
+
+      - name: Run the action
+        id: pie-ext-binary-builder
+        uses: ./
+        with:
+          configure-flags: '--with-hello-name=FROM_MY_ACTION --enable-example-pie-extension'
+          release-tag: ${{ env.RELEASE_TAG }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check Output
+        run: |
+          echo "Package path: ${{ steps.pie-ext-binary-builder.outputs.package-path }}"
+          ls -l

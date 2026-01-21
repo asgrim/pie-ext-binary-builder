@@ -121,3 +121,21 @@ jobs:
         run: |
           echo "Package path: ${{ steps.pie-ext-binary-builder.outputs.package-path }}"
           ls -l
+
+  delete-test-release:
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [test-action]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Delete test release
+        run: |
+          if gh release view "${{ env.RELEASE_TAG }}" > /dev/null 2>&1; then
+            gh release delete "${{ env.RELEASE_TAG }}" --yes --cleanup-tag
+          else
+            echo "Release ${{ env.RELEASE_TAG }} does not exist, skipping deletion."
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

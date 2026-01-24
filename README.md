@@ -70,8 +70,6 @@ jobs:
   # the release is immutable once published.
   create-draft-release:
     runs-on: ubuntu-latest
-    needs:
-      - build-assets
     permissions:
       # contents:write is required to create the draft release
       contents: write
@@ -120,7 +118,7 @@ jobs:
       # the given tag name
       - name: Build and release
         id: php-ext-binary-builder
-        uses: php/php-ext-binary-builder@v1
+        uses: php/pie-ext-binary-builder@0.0.2
         with:
           release-tag: ${{ github.ref_name }}
           github-token: ${{ secrets.GITHUB_TOKEN }}

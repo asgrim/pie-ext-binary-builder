@@ -13,7 +13,7 @@ inputs:
     required: true
 outputs:
   package-path:
-    description: 'Path to the generated .tgz package'
+    description: 'Path to the generated .zip package'
 runs:
   using: 'node20'
   main: dist/index.js

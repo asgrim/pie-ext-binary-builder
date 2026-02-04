@@ -40,7 +40,7 @@ with:
 
 | Name           | Description                       |
 |----------------|-----------------------------------|
-| `package-path` | Path to the generated `.tgz` file |
+| `package-path` | Path to the generated `.zip` file |
 
 ## Complete example
 

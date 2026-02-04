@@ -1,7 +1,6 @@
 name: Test the Action
 on:
   push:
-  pull_request:
 
 env:
   RELEASE_TAG: 0.0.0-fake+run_${{ github.run_id }}_${{ github.run_attempt }}

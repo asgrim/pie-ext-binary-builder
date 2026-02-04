@@ -40,7 +40,7 @@ with:
 
 | Name           | Description                       |
 |----------------|-----------------------------------|
-| `package-path` | Path to the generated `.tgz` file |
+| `package-path` | Path to the generated `.zip` file |
 
 ## Complete example
 
@@ -119,7 +119,7 @@ jobs:
       # the given tag name
       - name: Build and release
         id: php-ext-binary-builder
-        uses: php/pie-ext-binary-builder@0.0.1
+        uses: php/pie-ext-binary-builder@0.0.2
         with:
           release-tag: ${{ github.ref_name }}
           github-token: ${{ secrets.GITHUB_TOKEN }}

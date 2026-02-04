@@ -32303,13 +32303,13 @@ async function uploadReleaseAsset(releaseTag, packageFilename) {
     const zendDebug = await determinePhpDebugMode(phpBinary);
     const ztsMode = await determineZendThreadSafeMode(phpBinary);
     const extSoFile = `${extName}.so`;
-    const extPackageName = `php_${extName}-${releaseTag}_php${phpMajorMinor}-${arch}-${os}-${libcFlavour}${zendDebug}${ztsMode}.tgz`;
+    const extPackageName = `php_${extName}-${releaseTag}_php${phpMajorMinor}-${arch}-${os}-${libcFlavour}${zendDebug}${ztsMode}.zip`;
 
     await buildExtension();
 
     await exec.exec("ls", ["-l", "modules"]);
 
-    await exec.exec(`tar -cvzf ${extPackageName} -C modules ${extSoFile}`);
+    await exec.exec(`zip -j ${extPackageName} modules/${extSoFile}`);
 
     await uploadReleaseAsset(releaseTag, extPackageName);
 

@@ -6,32 +6,8 @@ env:
   RELEASE_TAG: 0.0.0-fake+run_${{ github.run_id }}
 
 jobs:
-  create-test-release:
-    runs-on: ubuntu-latest
-    permissions:
-      # contents:write is required to upload to the release assets
-      contents: write
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-tags: 'true'
-          ref: ${{ github.ref }}
-
-      - name: Create a fake tag for the build
-        run: |
-          git config --global user.email "Fake User"
-          git config --global user.name "fake-user@example.com"
-          git tag -a -m "test tag for CI build ${{ github.run_id }}" ${{ env.RELEASE_TAG }}
-          git push origin ${{ env.RELEASE_TAG }}
-
-      - name: Create a fake release for the build
-        run: gh release create "${{ env.RELEASE_TAG }}" --title "${{ env.RELEASE_TAG }}" --draft --notes-from-tag
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   test-action:
     runs-on: ${{ matrix.operating-system }}
-    needs: [create-test-release]
     strategy:
       fail-fast: false
       matrix:
@@ -89,6 +65,7 @@ jobs:
         with:
           configure-flags: '--with-hello-name=FROM_MY_ACTION --enable-example-pie-extension'
           release-tag: ${{ env.RELEASE_TAG }}
+          create-release: 'true'
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check Output
@@ -106,7 +83,7 @@ jobs:
       - name: Delete test release
         run: |
           if gh release view "${{ env.RELEASE_TAG }}" > /dev/null 2>&1; then
-            gh release delete "${{ env.RELEASE_TAG }}" --yes --cleanup-tag
+            gh release delete "${{ env.RELEASE_TAG }}" --yes
           else
             echo "Release ${{ env.RELEASE_TAG }} does not exist, skipping deletion."
           fi

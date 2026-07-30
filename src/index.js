@@ -154,6 +154,140 @@ async function uploadBuildArtifact(packageFilename) {
     await artifact.uploadArtifact(packageFilename, [packageFilename], ".");
 }
 
+async function findRelease(octokit, owner, repo, releaseTag) {
+    const { data: releases } = await octokit.rest.repos.listReleases({
+        owner,
+        repo,
+    });
+
+    return releases.find(r => r.tag_name === releaseTag);
+}
+
+async function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const RELEASE_LOCK_POLL_INTERVAL_MS = 2000;
+const RELEASE_LOCK_MAX_POLL_ATTEMPTS = 30;
+
+// Simulate `--notes-from-tag` flag since the octokit API doesn't have an equivalent
+async function getReleaseNotesFromTag(octokit, owner, repo, releaseTag) {
+    let ref;
+    try {
+        ({ data: ref } = await octokit.rest.git.getRef({
+            owner,
+            repo,
+            ref: `tags/${releaseTag}`,
+        }));
+    } catch (err) {
+        if (err.status !== 404) {
+            throw err;
+        }
+        return '';
+    }
+
+    if (ref.object.type === 'tag') {
+        const { data: tagObject } = await octokit.rest.git.getTag({
+            owner,
+            repo,
+            tag_sha: ref.object.sha,
+        });
+        return tagObject.message;
+    }
+
+    const { data: commit } = await octokit.rest.git.getCommit({
+        owner,
+        repo,
+        commit_sha: ref.object.sha,
+    });
+    return commit.message;
+}
+
+async function deleteReleaseLock(octokit, owner, repo, releaseTag) {
+    try {
+        await octokit.rest.git.deleteRef({
+            owner,
+            repo,
+            ref: `pie-release-lock/${releaseTag}`,
+        });
+    } catch (err) {
+        core.warning(`Failed to release lock for tag: ${releaseTag} after a failed release creation: ${err.message}`);
+    }
+}
+
+// Create the release, but use a ref locking approach to avoid TOCTOU race
+// conditions that would result in multiple duplicate draft releases being
+// created.
+async function createRelease(releaseTag) {
+    const githubToken = core.getInput("github-token");
+    const octokit = github.getOctokit(githubToken);
+    const { owner, repo } = github.context.repo;
+
+    core.info(`Checking whether a release already exists for tag: ${releaseTag}...`);
+    if (await action.findRelease(octokit, owner, repo, releaseTag)) {
+        core.info(`Release already exists for tag: ${releaseTag}, skipping creation.`);
+        return;
+    }
+
+    const lockRef = `refs/pie-release-lock/${releaseTag}`;
+    core.info(`Release not found for tag: ${releaseTag}. Attempting to acquire lock (${lockRef}) to create it...`);
+
+    let lockAcquired = false;
+    try {
+        await octokit.rest.git.createRef({
+            owner,
+            repo,
+            ref: lockRef,
+            sha: github.context.sha,
+        });
+        lockAcquired = true;
+    } catch (err) {
+        if (err.status !== 422) {
+            throw err;
+        }
+        core.info("Lock is already held by another job, will wait for the release to be created...");
+    }
+
+    if (lockAcquired) {
+        core.info(`Lock acquired, creating release for tag: ${releaseTag}...`);
+        try {
+            const notes = await action.getReleaseNotesFromTag(octokit, owner, repo, releaseTag);
+            await octokit.rest.repos.createRelease({
+                owner,
+                repo,
+                tag_name: releaseTag,
+                name: releaseTag,
+                draft: true,
+                ...(notes ? { body: notes } : { generate_release_notes: true }),
+            });
+        } catch (err) {
+            if (!(await action.findRelease(octokit, owner, repo, releaseTag))) {
+                await action.deleteReleaseLock(octokit, owner, repo, releaseTag);
+            }
+            throw err;
+        }
+
+        core.info(`Release created for tag: ${releaseTag}.`);
+        return;
+    }
+
+    for (let attempt = 1; attempt <= RELEASE_LOCK_MAX_POLL_ATTEMPTS; attempt++) {
+        await action.sleep(RELEASE_LOCK_POLL_INTERVAL_MS);
+
+        if (await action.findRelease(octokit, owner, repo, releaseTag)) {
+            core.info(`Release for tag: ${releaseTag} has now been created by another job.`);
+            return;
+        }
+
+        core.info(`Still waiting for release to be created for tag: ${releaseTag} (attempt ${attempt}/${RELEASE_LOCK_MAX_POLL_ATTEMPTS})...`);
+    }
+
+    throw new Error(`Timed out waiting for release to be created for tag: ${releaseTag}`);
+}
+
+const RELEASE_VISIBILITY_POLL_INTERVAL_MS = 1000;
+const RELEASE_VISIBILITY_MAX_POLL_ATTEMPTS = 10;
+
 async function uploadReleaseAsset(releaseTag, packageFilename) {
     core.info("Uploading release asset...");
     const githubToken = core.getInput("github-token");
@@ -162,12 +296,17 @@ async function uploadReleaseAsset(releaseTag, packageFilename) {
     const { owner, repo } = github.context.repo;
 
     core.info(`Searching for release with tag: ${releaseTag} (including drafts)...`);
-    const { data: releases } = await octokit.rest.repos.listReleases({
-        owner,
-        repo,
-    });
+    let release = await action.findRelease(octokit, owner, repo, releaseTag);
 
-    const release = releases.find(r => r.tag_name === releaseTag);
+    // A release that was just created (e.g. by createRelease) can take a moment to become
+    // visible via listReleases, even to the job that just created it - so don't fail on
+    // the first miss.
+    for (let attempt = 1; !release && attempt <= RELEASE_VISIBILITY_MAX_POLL_ATTEMPTS; attempt++) {
+        core.info(`Release not visible yet for tag: ${releaseTag}, retrying (attempt ${attempt}/${RELEASE_VISIBILITY_MAX_POLL_ATTEMPTS})...`);
+        await action.sleep(RELEASE_VISIBILITY_POLL_INTERVAL_MS);
+        release = await action.findRelease(octokit, owner, repo, releaseTag);
+    }
+
     if (!release) {
         throw new Error(`No release found for tag: ${releaseTag}`);
     }
@@ -213,6 +352,9 @@ async function main() {
 
     await exec.exec("zip", ["-j", extPackageName, path.join(modulesDir, extSoFile)]);
 
+    if (core.getBooleanInput("create-release")) {
+        await action.createRelease(releaseTag);
+    }
     if (core.getBooleanInput("upload-artifacts")) {
         await action.uploadBuildArtifact(extPackageName);
     }
@@ -232,6 +374,11 @@ const action = {
     determinePhpDebugMode,
     determineZendThreadSafeMode,
     uploadBuildArtifact,
+    findRelease,
+    sleep,
+    getReleaseNotesFromTag,
+    deleteReleaseLock,
+    createRelease,
     uploadReleaseAsset,
     extensionDetails,
     main,
@@ -248,6 +395,11 @@ export {
     determinePhpDebugMode,
     determineZendThreadSafeMode,
     uploadBuildArtifact,
+    findRelease,
+    sleep,
+    getReleaseNotesFromTag,
+    deleteReleaseLock,
+    createRelease,
     uploadReleaseAsset,
     extensionDetails,
     main,

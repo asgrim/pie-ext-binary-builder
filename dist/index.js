@@ -78267,7 +78267,9 @@ var __webpack_exports__ = {};
 // EXPORTS
 __nccwpck_require__.d(__webpack_exports__, {
   yw: () => (/* binding */ buildExtension),
+  YG: () => (/* binding */ createRelease),
   Ay: () => (/* binding */ src_0),
+  _m: () => (/* binding */ deleteReleaseLock),
   fj: () => (/* binding */ determineArchitecture),
   aS: () => (/* binding */ determineExtensionNameFromComposerJson),
   vi: () => (/* binding */ determineLibcFlavour),
@@ -78277,7 +78279,10 @@ __nccwpck_require__.d(__webpack_exports__, {
   _2: () => (/* binding */ determinePhpVersionFromPhpConfig),
   v_: () => (/* binding */ determineZendThreadSafeMode),
   _E: () => (/* binding */ extensionDetails),
+  dv: () => (/* binding */ findRelease),
+  Rd: () => (/* binding */ getReleaseNotesFromTag),
   iW: () => (/* binding */ main),
+  yy: () => (/* binding */ sleep),
   Yq: () => (/* binding */ uploadBuildArtifact),
   fC: () => (/* binding */ uploadReleaseAsset)
 });
@@ -138397,6 +138402,140 @@ async function uploadBuildArtifact(packageFilename) {
     await artifact.uploadArtifact(packageFilename, [packageFilename], ".");
 }
 
+async function findRelease(octokit, owner, repo, releaseTag) {
+    const { data: releases } = await octokit.rest.repos.listReleases({
+        owner,
+        repo,
+    });
+
+    return releases.find(r => r.tag_name === releaseTag);
+}
+
+async function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const RELEASE_LOCK_POLL_INTERVAL_MS = 2000;
+const RELEASE_LOCK_MAX_POLL_ATTEMPTS = 30;
+
+// Simulate `--notes-from-tag` flag since the octokit API doesn't have an equivalent
+async function getReleaseNotesFromTag(octokit, owner, repo, releaseTag) {
+    let ref;
+    try {
+        ({ data: ref } = await octokit.rest.git.getRef({
+            owner,
+            repo,
+            ref: `tags/${releaseTag}`,
+        }));
+    } catch (err) {
+        if (err.status !== 404) {
+            throw err;
+        }
+        return '';
+    }
+
+    if (ref.object.type === 'tag') {
+        const { data: tagObject } = await octokit.rest.git.getTag({
+            owner,
+            repo,
+            tag_sha: ref.object.sha,
+        });
+        return tagObject.message;
+    }
+
+    const { data: commit } = await octokit.rest.git.getCommit({
+        owner,
+        repo,
+        commit_sha: ref.object.sha,
+    });
+    return commit.message;
+}
+
+async function deleteReleaseLock(octokit, owner, repo, releaseTag) {
+    try {
+        await octokit.rest.git.deleteRef({
+            owner,
+            repo,
+            ref: `pie-release-lock/${releaseTag}`,
+        });
+    } catch (err) {
+        warning(`Failed to release lock for tag: ${releaseTag} after a failed release creation: ${err.message}`);
+    }
+}
+
+// Create the release, but use a ref locking approach to avoid TOCTOU race
+// conditions that would result in multiple duplicate draft releases being
+// created.
+async function createRelease(releaseTag) {
+    const githubToken = getInput("github-token");
+    const octokit = getOctokit(githubToken);
+    const { owner, repo } = github_context.repo;
+
+    info(`Checking whether a release already exists for tag: ${releaseTag}...`);
+    if (await src_action.findRelease(octokit, owner, repo, releaseTag)) {
+        info(`Release already exists for tag: ${releaseTag}, skipping creation.`);
+        return;
+    }
+
+    const lockRef = `refs/pie-release-lock/${releaseTag}`;
+    info(`Release not found for tag: ${releaseTag}. Attempting to acquire lock (${lockRef}) to create it...`);
+
+    let lockAcquired = false;
+    try {
+        await octokit.rest.git.createRef({
+            owner,
+            repo,
+            ref: lockRef,
+            sha: github_context.sha,
+        });
+        lockAcquired = true;
+    } catch (err) {
+        if (err.status !== 422) {
+            throw err;
+        }
+        info("Lock is already held by another job, will wait for the release to be created...");
+    }
+
+    if (lockAcquired) {
+        info(`Lock acquired, creating release for tag: ${releaseTag}...`);
+        try {
+            const notes = await src_action.getReleaseNotesFromTag(octokit, owner, repo, releaseTag);
+            await octokit.rest.repos.createRelease({
+                owner,
+                repo,
+                tag_name: releaseTag,
+                name: releaseTag,
+                draft: true,
+                ...(notes ? { body: notes } : { generate_release_notes: true }),
+            });
+        } catch (err) {
+            if (!(await src_action.findRelease(octokit, owner, repo, releaseTag))) {
+                await src_action.deleteReleaseLock(octokit, owner, repo, releaseTag);
+            }
+            throw err;
+        }
+
+        info(`Release created for tag: ${releaseTag}.`);
+        return;
+    }
+
+    for (let attempt = 1; attempt <= RELEASE_LOCK_MAX_POLL_ATTEMPTS; attempt++) {
+        await src_action.sleep(RELEASE_LOCK_POLL_INTERVAL_MS);
+
+        if (await src_action.findRelease(octokit, owner, repo, releaseTag)) {
+            info(`Release for tag: ${releaseTag} has now been created by another job.`);
+            return;
+        }
+
+        info(`Still waiting for release to be created for tag: ${releaseTag} (attempt ${attempt}/${RELEASE_LOCK_MAX_POLL_ATTEMPTS})...`);
+    }
+
+    throw new Error(`Timed out waiting for release to be created for tag: ${releaseTag}`);
+}
+
+const RELEASE_VISIBILITY_POLL_INTERVAL_MS = 1000;
+const RELEASE_VISIBILITY_MAX_POLL_ATTEMPTS = 10;
+
 async function uploadReleaseAsset(releaseTag, packageFilename) {
     info("Uploading release asset...");
     const githubToken = getInput("github-token");
@@ -138405,12 +138544,17 @@ async function uploadReleaseAsset(releaseTag, packageFilename) {
     const { owner, repo } = github_context.repo;
 
     info(`Searching for release with tag: ${releaseTag} (including drafts)...`);
-    const { data: releases } = await octokit.rest.repos.listReleases({
-        owner,
-        repo,
-    });
+    let release = await src_action.findRelease(octokit, owner, repo, releaseTag);
 
-    const release = releases.find(r => r.tag_name === releaseTag);
+    // A release that was just created (e.g. by createRelease) can take a moment to become
+    // visible via listReleases, even to the job that just created it - so don't fail on
+    // the first miss.
+    for (let attempt = 1; !release && attempt <= RELEASE_VISIBILITY_MAX_POLL_ATTEMPTS; attempt++) {
+        info(`Release not visible yet for tag: ${releaseTag}, retrying (attempt ${attempt}/${RELEASE_VISIBILITY_MAX_POLL_ATTEMPTS})...`);
+        await src_action.sleep(RELEASE_VISIBILITY_POLL_INTERVAL_MS);
+        release = await src_action.findRelease(octokit, owner, repo, releaseTag);
+    }
+
     if (!release) {
         throw new Error(`No release found for tag: ${releaseTag}`);
     }
@@ -138456,6 +138600,9 @@ async function main() {
 
     await exec_exec("zip", ["-j", extPackageName, external_path_.join(modulesDir, extSoFile)]);
 
+    if (getBooleanInput("create-release")) {
+        await src_action.createRelease(releaseTag);
+    }
     if (getBooleanInput("upload-artifacts")) {
         await src_action.uploadBuildArtifact(extPackageName);
     }
@@ -138475,6 +138622,11 @@ const src_action = {
     determinePhpDebugMode,
     determineZendThreadSafeMode,
     uploadBuildArtifact,
+    findRelease,
+    sleep,
+    getReleaseNotesFromTag,
+    deleteReleaseLock,
+    createRelease,
     uploadReleaseAsset,
     extensionDetails,
     main,
@@ -138488,7 +138640,9 @@ if (process.argv[1] === (0,external_url_.fileURLToPath)(import.meta.url)) {
 }
 
 var __webpack_exports__buildExtension = __webpack_exports__.yw;
+var __webpack_exports__createRelease = __webpack_exports__.YG;
 var __webpack_exports__default = __webpack_exports__.Ay;
+var __webpack_exports__deleteReleaseLock = __webpack_exports__._m;
 var __webpack_exports__determineArchitecture = __webpack_exports__.fj;
 var __webpack_exports__determineExtensionNameFromComposerJson = __webpack_exports__.aS;
 var __webpack_exports__determineLibcFlavour = __webpack_exports__.vi;
@@ -138498,9 +138652,12 @@ var __webpack_exports__determinePhpDebugMode = __webpack_exports__.qD;
 var __webpack_exports__determinePhpVersionFromPhpConfig = __webpack_exports__._2;
 var __webpack_exports__determineZendThreadSafeMode = __webpack_exports__.v_;
 var __webpack_exports__extensionDetails = __webpack_exports__._E;
+var __webpack_exports__findRelease = __webpack_exports__.dv;
+var __webpack_exports__getReleaseNotesFromTag = __webpack_exports__.Rd;
 var __webpack_exports__main = __webpack_exports__.iW;
+var __webpack_exports__sleep = __webpack_exports__.yy;
 var __webpack_exports__uploadBuildArtifact = __webpack_exports__.Yq;
 var __webpack_exports__uploadReleaseAsset = __webpack_exports__.fC;
-export { __webpack_exports__buildExtension as buildExtension, __webpack_exports__default as default, __webpack_exports__determineArchitecture as determineArchitecture, __webpack_exports__determineExtensionNameFromComposerJson as determineExtensionNameFromComposerJson, __webpack_exports__determineLibcFlavour as determineLibcFlavour, __webpack_exports__determineOperatingSystem as determineOperatingSystem, __webpack_exports__determinePhpBinary as determinePhpBinary, __webpack_exports__determinePhpDebugMode as determinePhpDebugMode, __webpack_exports__determinePhpVersionFromPhpConfig as determinePhpVersionFromPhpConfig, __webpack_exports__determineZendThreadSafeMode as determineZendThreadSafeMode, __webpack_exports__extensionDetails as extensionDetails, __webpack_exports__main as main, __webpack_exports__uploadBuildArtifact as uploadBuildArtifact, __webpack_exports__uploadReleaseAsset as uploadReleaseAsset };
+export { __webpack_exports__buildExtension as buildExtension, __webpack_exports__createRelease as createRelease, __webpack_exports__default as default, __webpack_exports__deleteReleaseLock as deleteReleaseLock, __webpack_exports__determineArchitecture as determineArchitecture, __webpack_exports__determineExtensionNameFromComposerJson as determineExtensionNameFromComposerJson, __webpack_exports__determineLibcFlavour as determineLibcFlavour, __webpack_exports__determineOperatingSystem as determineOperatingSystem, __webpack_exports__determinePhpBinary as determinePhpBinary, __webpack_exports__determinePhpDebugMode as determinePhpDebugMode, __webpack_exports__determinePhpVersionFromPhpConfig as determinePhpVersionFromPhpConfig, __webpack_exports__determineZendThreadSafeMode as determineZendThreadSafeMode, __webpack_exports__extensionDetails as extensionDetails, __webpack_exports__findRelease as findRelease, __webpack_exports__getReleaseNotesFromTag as getReleaseNotesFromTag, __webpack_exports__main as main, __webpack_exports__sleep as sleep, __webpack_exports__uploadBuildArtifact as uploadBuildArtifact, __webpack_exports__uploadReleaseAsset as uploadReleaseAsset };
 
 //# sourceMappingURL=index.js.map

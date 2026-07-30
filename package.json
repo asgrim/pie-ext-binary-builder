@@ -8,17 +8,21 @@
     "build": "ncc build src/index.js -o dist --source-map --license licenses.txt",
     "test": "vitest run --coverage"
   },
-  "keywords": ["github", "actions"],
+  "keywords": [
+    "github",
+    "actions"
+  ],
   "author": "James Titcumb <asgrim@php.net>",
   "license": "BSD-3-Clause",
   "dependencies": {
+    "@actions/artifact": "^6.2.1",
     "@actions/core": "^3.0.1",
     "@actions/exec": "^3.0.0",
     "@actions/github": "^9.1.1"
   },
   "devDependencies": {
-    "@vitest/coverage-v8": "^4.1.8",
     "@vercel/ncc": "^0.38.4",
+    "@vitest/coverage-v8": "^4.1.8",
     "vitest": "^4.1.8"
   }
 }

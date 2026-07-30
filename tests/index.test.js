@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
+    artifact: {
+        uploadArtifact: vi.fn(),
+    },
     exec: {
         exec: vi.fn(),
         getExecOutput: vi.fn(),
@@ -26,6 +29,9 @@ const mocks = vi.hoisted(() => ({
     },
 }));
 
+vi.mock('@actions/artifact', () => ({
+    default: mocks.artifact,
+}));
 vi.mock('@actions/core', () => mocks.core);
 vi.mock('@actions/exec', () => mocks.exec);
 vi.mock('@actions/github', () => mocks.github);
@@ -34,7 +40,7 @@ vi.mock('fs', () => ({
     ...mocks.fs,
 }));
 
-const { core, exec, fs, github } = mocks;
+const { artifact, core, exec, fs, github } = mocks;
 const action = (await import('../src/index.js')).default;
 
 describe('determinePhpVersionFromPhpConfig', () => {
@@ -385,6 +391,14 @@ describe('buildExtension', () => {
     });
 });
 
+describe('uploadBuildArtifact', () => {
+    test('uploads the build artifact', async () => {
+        await action.uploadBuildArtifact('release-asset.zip');
+
+        expect(artifact.uploadArtifact).toHaveBeenCalledWith('release-asset.zip', ['release-asset.zip'], '.');
+    });
+});
+
 describe('uploadReleaseAsset', () => {
     let octokit;
 
@@ -504,6 +518,7 @@ describe('main', () => {
             extPackageName: 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip',
         });
         vi.spyOn(action, 'buildExtension').mockResolvedValue();
+        vi.spyOn(action, 'uploadBuildArtifact').mockResolvedValue();
         vi.spyOn(action, 'uploadReleaseAsset').mockResolvedValue();
         vi.spyOn(exec, 'exec').mockResolvedValue();
         core.getInput.mockImplementation((name) => {
@@ -514,6 +529,7 @@ describe('main', () => {
         await action.main();
 
         expect(action.buildExtension).toHaveBeenCalled();
+        expect(action.uploadBuildArtifact).toHaveBeenCalledWith('php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip');
         expect(action.uploadReleaseAsset).toHaveBeenCalledWith('1.2.3', 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip');
         expect(exec.exec).toHaveBeenCalledWith('ls', ['-l', 'modules']);
         expect(exec.exec).toHaveBeenCalledWith('zip', ['-j', 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip', 'modules/foo.so']);
@@ -527,6 +543,7 @@ describe('main', () => {
             extPackageName: 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip',
         });
         vi.spyOn(action, 'buildExtension').mockResolvedValue();
+        vi.spyOn(action, 'uploadBuildArtifact').mockResolvedValue();
         vi.spyOn(action, 'uploadReleaseAsset').mockResolvedValue();
         vi.spyOn(exec, 'exec').mockResolvedValue();
         core.getInput.mockImplementation((name) => {
@@ -537,6 +554,7 @@ describe('main', () => {
         await action.main();
 
         expect(action.buildExtension).toHaveBeenCalled();
+        expect(action.uploadBuildArtifact).toHaveBeenCalledWith('php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip');
         expect(action.uploadReleaseAsset).toHaveBeenCalledWith('1.2.3', 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip');
         expect(exec.exec).toHaveBeenCalledWith('ls', ['-l', 'src/php/ext/grpc/modules']);
         expect(exec.exec).toHaveBeenCalledWith('zip', ['-j', 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip', 'src/php/ext/grpc/modules/foo.so']);

@@ -7,6 +7,7 @@ them to your GitHub releases. It will:
  - Build a `.so` from your extension
  - Package the `.so` in an archive, and name it according to PIE's expectations
  - Upload the archive to your GitHub release
+ - Upload the archive as a workflow build artifact
 
 > [!TIP]
 > Looking for Windows support? You probably want [`php/php-windows-builder`](https://github.com/php/php-windows-builder?tab=readme-ov-file#examples)

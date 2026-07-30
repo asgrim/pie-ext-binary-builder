@@ -90,6 +90,7 @@ jobs:
           configure-flags: '--with-hello-name=FROM_MY_ACTION --enable-example-pie-extension'
           release-tag: ${{ env.RELEASE_TAG }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          upload-artifacts: 'true'
 
       - name: Check Output
         run: |

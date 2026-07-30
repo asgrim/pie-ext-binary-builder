@@ -7,7 +7,7 @@ them to your GitHub releases. It will:
  - Build a `.so` from your extension
  - Package the `.so` in an archive, and name it according to PIE's expectations
  - Upload the archive to your GitHub release
- - Upload the archive as a workflow build artifact
+ - Optionally upload the archive as a workflow build artifact
 
 > [!TIP]
 > Looking for Windows support? You probably want [`php/php-windows-builder`](https://github.com/php/php-windows-builder?tab=readme-ov-file#examples)
@@ -31,12 +31,13 @@ with:
 
 ### Inputs
 
-| Name              | Description                                                                                     | Required | Default |
-|-------------------|-------------------------------------------------------------------------------------------------|----------|---------|
-| `release-tag`     | The tag to use when building the extension; there must be an existing draft release for the tag | `true`   | -       |
-| `github-token`    | The GitHub token to use. Usually `${{ secrets.GITHUB_TOKEN }}` would be fine for most cases.    | `true`   | -       |
-| `configure-flags` | If you need to pass additional flags to the `./configure` command, specify them here            | `false`  | `''`    |
-| `build-path`      | Path to the extension source directory containing `config.m4`, relative to repo root           | `false`  | `'.'`   |
+| Name               | Description                                                                                     | Required | Default   |
+|--------------------|-------------------------------------------------------------------------------------------------|----------|-----------|
+| `release-tag`      | The tag to use when building the extension; there must be an existing draft release for the tag | `true`   | -         |
+| `github-token`     | The GitHub token to use. Usually `${{ secrets.GITHUB_TOKEN }}` would be fine for most cases.    | `true`   | -         |
+| `configure-flags`  | If you need to pass additional flags to the `./configure` command, specify them here            | `false`  | `''`      |
+| `build-path`       | Path to the extension source directory containing `config.m4`, relative to repo root            | `false`  | `'.'`     |
+| `upload-artifacts` | Whether to upload the generated `.zip` as a workflow build artifact                             | `false`  | `'false'` |
 
 ### Outputs
 

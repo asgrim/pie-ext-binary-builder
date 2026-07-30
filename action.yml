@@ -9,6 +9,10 @@ inputs:
     description: 'Path to the extension source directory containing config.m4 (relative to repo root)'
     required: false
     default: '.'
+  upload-artifacts:
+    description: 'Whether to upload the generated .zip as a workflow build artifact'
+    required: false
+    default: 'false'
   release-tag:
     description: 'The tag to use for the release'
     required: true

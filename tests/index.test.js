@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
     },
     core: {
         getInput: vi.fn(),
+        getBooleanInput: vi.fn(),
         info: vi.fn(),
         setOutput: vi.fn(),
         warning: vi.fn(),
@@ -511,6 +512,10 @@ describe('extensionDetails', () => {
 });
 
 describe('main', () => {
+    beforeEach(() => {
+        vi.restoreAllMocks();
+    });
+
     test('main builds and uploads extension with default build path', async () => {
         vi.spyOn(action, 'extensionDetails').mockResolvedValue({
             releaseTag: '1.2.3',
@@ -525,6 +530,7 @@ describe('main', () => {
             if (name === 'build-path') return '.';
             return '';
         });
+        core.getBooleanInput.mockReturnValue(true);
 
         await action.main();
 
@@ -550,6 +556,7 @@ describe('main', () => {
             if (name === 'build-path') return 'src/php/ext/grpc';
             return '';
         });
+        core.getBooleanInput.mockReturnValue(true);
 
         await action.main();
 
@@ -559,5 +566,27 @@ describe('main', () => {
         expect(exec.exec).toHaveBeenCalledWith('ls', ['-l', 'src/php/ext/grpc/modules']);
         expect(exec.exec).toHaveBeenCalledWith('zip', ['-j', 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip', 'src/php/ext/grpc/modules/foo.so']);
         expect(core.setOutput).toHaveBeenCalledWith('package-path', 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip');
+    });
+
+    test('main does not upload build artifact when upload-artifacts is disabled', async () => {
+        vi.spyOn(action, 'extensionDetails').mockResolvedValue({
+            releaseTag: '1.2.3',
+            extSoFile: 'foo.so',
+            extPackageName: 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip',
+        });
+        vi.spyOn(action, 'buildExtension').mockResolvedValue();
+        vi.spyOn(action, 'uploadBuildArtifact').mockResolvedValue();
+        vi.spyOn(action, 'uploadReleaseAsset').mockResolvedValue();
+        vi.spyOn(exec, 'exec').mockResolvedValue();
+        core.getInput.mockImplementation((name) => {
+            if (name === 'build-path') return '.';
+            return '';
+        });
+        core.getBooleanInput.mockReturnValue(false);
+
+        await action.main();
+
+        expect(action.uploadBuildArtifact).not.toHaveBeenCalled();
+        expect(action.uploadReleaseAsset).toHaveBeenCalledWith('1.2.3', 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip');
     });
 });

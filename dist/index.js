@@ -138456,7 +138456,9 @@ async function main() {
 
     await exec_exec("zip", ["-j", extPackageName, external_path_.join(modulesDir, extSoFile)]);
 
-    await src_action.uploadBuildArtifact(extPackageName);
+    if (getBooleanInput("upload-artifacts")) {
+        await src_action.uploadBuildArtifact(extPackageName);
+    }
     await src_action.uploadReleaseAsset(releaseTag, extPackageName);
 
     setOutput("package-path", extPackageName);

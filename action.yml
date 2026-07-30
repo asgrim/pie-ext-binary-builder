@@ -12,6 +12,10 @@ inputs:
   release-tag:
     description: 'The tag to use for the release'
     required: true
+  create-release:
+    description: 'Create the release (as a draft) if it does not already exist for the release-tag'
+    required: false
+    default: 'false'
   github-token:
     description: 'The GitHub token to use for uploading assets'
     required: true

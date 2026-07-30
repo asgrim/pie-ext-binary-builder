@@ -16,10 +16,12 @@ const mocks = vi.hoisted(() => ({
                 owner: 'the-owner',
                 repo: 'the-repo',
             },
+            sha: 'deadbeef',
         },
     },
     core: {
         getInput: vi.fn(),
+        getBooleanInput: vi.fn(),
         info: vi.fn(),
         setOutput: vi.fn(),
         warning: vi.fn(),
@@ -385,6 +387,237 @@ describe('buildExtension', () => {
     });
 });
 
+describe('findRelease', () => {
+    let octokit;
+
+    beforeEach(() => {
+        octokit = {
+            rest: {
+                repos: {
+                    listReleases: vi.fn(),
+                },
+            },
+        };
+    });
+
+    test('returns matching release including drafts', async () => {
+        octokit.rest.repos.listReleases.mockResolvedValue({
+            data: [{ id: 123, tag_name: '1.0.0', name: 'Release 1.0.0', draft: true }],
+        });
+
+        const release = await action.findRelease(octokit, 'the-owner', 'the-repo', '1.0.0');
+
+        expect(octokit.rest.repos.listReleases).toHaveBeenCalledWith({
+            owner: 'the-owner',
+            repo: 'the-repo',
+        });
+        expect(release).toEqual({ id: 123, tag_name: '1.0.0', name: 'Release 1.0.0', draft: true });
+    });
+
+    test('returns undefined when no release matches the tag', async () => {
+        octokit.rest.repos.listReleases.mockResolvedValue({ data: [] });
+
+        expect(await action.findRelease(octokit, 'the-owner', 'the-repo', '1.0.0'))
+            .toBeUndefined();
+    });
+});
+
+describe('sleep', () => {
+    test('resolves after the given delay', async () => {
+        vi.useFakeTimers();
+        try {
+            const resolved = vi.fn();
+            action.sleep(1000).then(resolved);
+
+            await vi.advanceTimersByTimeAsync(999);
+            expect(resolved).not.toHaveBeenCalled();
+
+            await vi.advanceTimersByTimeAsync(1);
+            expect(resolved).toHaveBeenCalled();
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+});
+
+describe('getReleaseNotesFromTag', () => {
+    let octokit;
+
+    beforeEach(() => {
+        octokit = {
+            rest: {
+                git: {
+                    getRef: vi.fn(),
+                    getTag: vi.fn(),
+                    getCommit: vi.fn(),
+                },
+            },
+        };
+    });
+
+    test('returns the annotated tag message', async () => {
+        octokit.rest.git.getRef.mockResolvedValue({ data: { object: { type: 'tag', sha: 'tag-sha' } } });
+        octokit.rest.git.getTag.mockResolvedValue({ data: { message: 'Annotated tag message' } });
+
+        expect(await action.getReleaseNotesFromTag(octokit, 'the-owner', 'the-repo', '1.0.0'))
+            .toBe('Annotated tag message');
+        expect(octokit.rest.git.getRef).toHaveBeenCalledWith({ owner: 'the-owner', repo: 'the-repo', ref: 'tags/1.0.0' });
+        expect(octokit.rest.git.getTag).toHaveBeenCalledWith({ owner: 'the-owner', repo: 'the-repo', tag_sha: 'tag-sha' });
+        expect(octokit.rest.git.getCommit).not.toHaveBeenCalled();
+    });
+
+    test('falls back to the commit message for a lightweight (unannotated) tag', async () => {
+        octokit.rest.git.getRef.mockResolvedValue({ data: { object: { type: 'commit', sha: 'commit-sha' } } });
+        octokit.rest.git.getCommit.mockResolvedValue({ data: { message: 'Commit message' } });
+
+        expect(await action.getReleaseNotesFromTag(octokit, 'the-owner', 'the-repo', '1.0.0'))
+            .toBe('Commit message');
+        expect(octokit.rest.git.getCommit).toHaveBeenCalledWith({ owner: 'the-owner', repo: 'the-repo', commit_sha: 'commit-sha' });
+        expect(octokit.rest.git.getTag).not.toHaveBeenCalled();
+    });
+
+    test('returns an empty string when the tag does not exist yet', async () => {
+        const notFoundError = new Error('Not Found');
+        notFoundError.status = 404;
+        octokit.rest.git.getRef.mockRejectedValue(notFoundError);
+
+        expect(await action.getReleaseNotesFromTag(octokit, 'the-owner', 'the-repo', '1.0.0'))
+            .toBe('');
+    });
+
+    test('rethrows unexpected errors', async () => {
+        const unexpectedError = new Error('Something else went wrong');
+        unexpectedError.status = 500;
+        octokit.rest.git.getRef.mockRejectedValue(unexpectedError);
+
+        await expect(action.getReleaseNotesFromTag(octokit, 'the-owner', 'the-repo', '1.0.0'))
+            .rejects
+            .toThrow('Something else went wrong');
+    });
+});
+
+describe('createRelease', () => {
+    let octokit;
+
+    beforeEach(() => {
+        octokit = {
+            rest: {
+                repos: {
+                    listReleases: vi.fn(),
+                    createRelease: vi.fn(),
+                },
+                git: {
+                    createRef: vi.fn(),
+                },
+            },
+        };
+        github.getOctokit.mockReturnValue(octokit);
+        core.getInput.mockReturnValue('fake-token');
+        vi.spyOn(action, 'sleep').mockReset().mockResolvedValue();
+        vi.spyOn(action, 'getReleaseNotesFromTag').mockReset().mockResolvedValue('');
+    });
+
+    test('does nothing when a release already exists for the tag', async () => {
+        octokit.rest.repos.listReleases.mockResolvedValue({
+            data: [{ id: 123, tag_name: '1.0.0', name: 'Release 1.0.0' }],
+        });
+
+        await action.createRelease('1.0.0');
+
+        expect(octokit.rest.git.createRef).not.toHaveBeenCalled();
+        expect(octokit.rest.repos.createRelease).not.toHaveBeenCalled();
+    });
+
+    test('acquires the lock and creates the release, leaving the lock ref in place', async () => {
+        octokit.rest.repos.listReleases.mockResolvedValue({ data: [] });
+        octokit.rest.git.createRef.mockResolvedValue({});
+        octokit.rest.repos.createRelease.mockResolvedValue({
+            data: { id: 456, tag_name: '1.0.0', name: '1.0.0' },
+        });
+
+        await action.createRelease('1.0.0');
+
+        expect(octokit.rest.git.createRef).toHaveBeenCalledWith({
+            owner: 'the-owner',
+            repo: 'the-repo',
+            ref: 'refs/pie-release-lock/1.0.0',
+            sha: 'deadbeef',
+        });
+        expect(octokit.rest.repos.createRelease).toHaveBeenCalledWith({
+            owner: 'the-owner',
+            repo: 'the-repo',
+            tag_name: '1.0.0',
+            name: '1.0.0',
+            draft: true,
+            generate_release_notes: true,
+        });
+    });
+
+    test('uses the tag/commit message as release notes when available', async () => {
+        octokit.rest.repos.listReleases.mockResolvedValue({ data: [] });
+        octokit.rest.git.createRef.mockResolvedValue({});
+        octokit.rest.repos.createRelease.mockResolvedValue({
+            data: { id: 456, tag_name: '1.0.0', name: '1.0.0' },
+        });
+        action.getReleaseNotesFromTag.mockResolvedValue('Notes from the tag');
+
+        await action.createRelease('1.0.0');
+
+        expect(octokit.rest.repos.createRelease).toHaveBeenCalledWith({
+            owner: 'the-owner',
+            repo: 'the-repo',
+            tag_name: '1.0.0',
+            name: '1.0.0',
+            draft: true,
+            body: 'Notes from the tag',
+        });
+    });
+
+    test('when lock is already held (TOCTOU race), polls until the release created by another job appears', async () => {
+        octokit.rest.repos.listReleases
+            .mockResolvedValueOnce({ data: [] }) // initial search
+            .mockResolvedValueOnce({ data: [] }) // first poll: not yet created by the winning job
+            .mockResolvedValueOnce({ data: [{ id: 789, tag_name: '1.0.0', name: '1.0.0' }] }); // second poll: found
+
+        const conflictError = new Error('Reference already exists');
+        conflictError.status = 422;
+        octokit.rest.git.createRef.mockRejectedValue(conflictError);
+
+        await action.createRelease('1.0.0');
+
+        expect(octokit.rest.repos.createRelease).not.toHaveBeenCalled();
+        expect(action.sleep).toHaveBeenCalledTimes(2);
+    });
+
+    test('throws if it times out waiting for another job to finish creating the release', async () => {
+        octokit.rest.repos.listReleases.mockResolvedValue({ data: [] });
+
+        const conflictError = new Error('Reference already exists');
+        conflictError.status = 422;
+        octokit.rest.git.createRef.mockRejectedValue(conflictError);
+
+        await expect(action.createRelease('1.0.0'))
+            .rejects
+            .toThrow('Timed out waiting for release to be created for tag: 1.0.0');
+
+        expect(octokit.rest.repos.createRelease).not.toHaveBeenCalled();
+    });
+
+    test('rethrows unexpected errors from lock acquisition', async () => {
+        octokit.rest.repos.listReleases.mockResolvedValue({ data: [] });
+
+        const unexpectedError = new Error('Something else went wrong');
+        unexpectedError.status = 500;
+        octokit.rest.git.createRef.mockRejectedValue(unexpectedError);
+
+        await expect(action.createRelease('1.0.0'))
+            .rejects
+            .toThrow('Something else went wrong');
+
+        expect(octokit.rest.repos.createRelease).not.toHaveBeenCalled();
+    });
+});
+
 describe('uploadReleaseAsset', () => {
     let octokit;
 
@@ -399,6 +632,7 @@ describe('uploadReleaseAsset', () => {
         };
         github.getOctokit.mockReturnValue(octokit);
         core.getInput.mockReturnValue('fake-token');
+        vi.spyOn(action, 'sleep').mockReset().mockResolvedValue();
     });
 
     test('successfully uploads asset', async () => {
@@ -435,6 +669,27 @@ describe('uploadReleaseAsset', () => {
         await expect(action.uploadReleaseAsset('1.0.0', 'release-asset.zip'))
             .rejects
             .toThrow('No release found for tag: 1.0.0');
+
+        expect(action.sleep).toHaveBeenCalledTimes(10);
+    });
+
+    test('retries and finds the release if it is not immediately visible after creation', async () => {
+        octokit.rest.repos.listReleases
+            .mockResolvedValueOnce({ data: [] })
+            .mockResolvedValueOnce({ data: [] })
+            .mockResolvedValueOnce({ data: [{ id: 123, tag_name: '1.0.0', name: 'Release 1.0.0' }] });
+        fs.readFileSync.mockReturnValue('release-asset-fake-data');
+
+        await action.uploadReleaseAsset('1.0.0', 'release-asset.zip');
+
+        expect(action.sleep).toHaveBeenCalledTimes(2);
+        expect(octokit.rest.repos.uploadReleaseAsset).toHaveBeenCalledWith({
+            owner: 'the-owner',
+            repo: 'the-repo',
+            release_id: 123,
+            name: 'release-asset.zip',
+            data: 'release-asset-fake-data',
+        });
     });
 
     test('throws error when release not found', async () => {
@@ -497,6 +752,10 @@ describe('extensionDetails', () => {
 });
 
 describe('main', () => {
+    beforeEach(() => {
+        core.getBooleanInput.mockReturnValue(false);
+    });
+
     test('main builds and uploads extension with default build path', async () => {
         vi.spyOn(action, 'extensionDetails').mockResolvedValue({
             releaseTag: '1.2.3',
@@ -541,5 +800,51 @@ describe('main', () => {
         expect(exec.exec).toHaveBeenCalledWith('ls', ['-l', 'src/php/ext/grpc/modules']);
         expect(exec.exec).toHaveBeenCalledWith('zip', ['-j', 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip', 'src/php/ext/grpc/modules/foo.so']);
         expect(core.setOutput).toHaveBeenCalledWith('package-path', 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip');
+    });
+
+    test('does not create a release when create-release is false', async () => {
+        vi.spyOn(action, 'extensionDetails').mockResolvedValue({
+            releaseTag: '1.2.3',
+            extSoFile: 'foo.so',
+            extPackageName: 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip',
+        });
+        vi.spyOn(action, 'buildExtension').mockResolvedValue();
+        vi.spyOn(action, 'createRelease').mockResolvedValue();
+        vi.spyOn(action, 'uploadReleaseAsset').mockResolvedValue();
+        vi.spyOn(exec, 'exec').mockResolvedValue();
+        core.getInput.mockImplementation((name) => {
+            if (name === 'build-path') return '.';
+            return '';
+        });
+        core.getBooleanInput.mockReturnValue(false);
+
+        await action.main();
+
+        expect(action.createRelease).not.toHaveBeenCalled();
+        expect(action.uploadReleaseAsset).toHaveBeenCalledWith('1.2.3', 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip');
+    });
+
+    test('creates the release before uploading the asset when create-release is true', async () => {
+        vi.spyOn(action, 'extensionDetails').mockResolvedValue({
+            releaseTag: '1.2.3',
+            extSoFile: 'foo.so',
+            extPackageName: 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip',
+        });
+        vi.spyOn(action, 'buildExtension').mockResolvedValue();
+        vi.spyOn(action, 'createRelease').mockResolvedValue();
+        vi.spyOn(action, 'uploadReleaseAsset').mockResolvedValue();
+        vi.spyOn(exec, 'exec').mockResolvedValue();
+        core.getInput.mockImplementation((name) => {
+            if (name === 'build-path') return '.';
+            return '';
+        });
+        core.getBooleanInput.mockImplementation((name) => name === 'create-release');
+
+        await action.main();
+
+        expect(action.createRelease).toHaveBeenCalledWith('1.2.3');
+        expect(action.uploadReleaseAsset).toHaveBeenCalledWith('1.2.3', 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip');
+        expect(action.createRelease.mock.invocationCallOrder.at(-1))
+            .toBeLessThan(action.uploadReleaseAsset.mock.invocationCallOrder.at(-1));
     });
 });

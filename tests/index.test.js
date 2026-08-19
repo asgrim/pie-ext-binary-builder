@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
+    artifact: {
+        uploadArtifact: vi.fn(),
+    },
     exec: {
         exec: vi.fn(),
         getExecOutput: vi.fn(),
@@ -20,12 +23,16 @@ const mocks = vi.hoisted(() => ({
     },
     core: {
         getInput: vi.fn(),
+        getBooleanInput: vi.fn(),
         info: vi.fn(),
         setOutput: vi.fn(),
         warning: vi.fn(),
     },
 }));
 
+vi.mock('@actions/artifact', () => ({
+    default: mocks.artifact,
+}));
 vi.mock('@actions/core', () => mocks.core);
 vi.mock('@actions/exec', () => mocks.exec);
 vi.mock('@actions/github', () => mocks.github);
@@ -34,7 +41,7 @@ vi.mock('fs', () => ({
     ...mocks.fs,
 }));
 
-const { core, exec, fs, github } = mocks;
+const { artifact, core, exec, fs, github } = mocks;
 const action = (await import('../src/index.js')).default;
 
 describe('determinePhpVersionFromPhpConfig', () => {
@@ -385,6 +392,14 @@ describe('buildExtension', () => {
     });
 });
 
+describe('uploadBuildArtifact', () => {
+    test('uploads the build artifact', async () => {
+        await action.uploadBuildArtifact('release-asset.zip');
+
+        expect(artifact.uploadArtifact).toHaveBeenCalledWith('release-asset.zip', ['release-asset.zip'], '.');
+    });
+});
+
 describe('uploadReleaseAsset', () => {
     let octokit;
 
@@ -497,6 +512,10 @@ describe('extensionDetails', () => {
 });
 
 describe('main', () => {
+    beforeEach(() => {
+        vi.restoreAllMocks();
+    });
+
     test('main builds and uploads extension with default build path', async () => {
         vi.spyOn(action, 'extensionDetails').mockResolvedValue({
             releaseTag: '1.2.3',
@@ -504,16 +523,19 @@ describe('main', () => {
             extPackageName: 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip',
         });
         vi.spyOn(action, 'buildExtension').mockResolvedValue();
+        vi.spyOn(action, 'uploadBuildArtifact').mockResolvedValue();
         vi.spyOn(action, 'uploadReleaseAsset').mockResolvedValue();
         vi.spyOn(exec, 'exec').mockResolvedValue();
         core.getInput.mockImplementation((name) => {
             if (name === 'build-path') return '.';
             return '';
         });
+        core.getBooleanInput.mockReturnValue(true);
 
         await action.main();
 
         expect(action.buildExtension).toHaveBeenCalled();
+        expect(action.uploadBuildArtifact).toHaveBeenCalledWith('php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip');
         expect(action.uploadReleaseAsset).toHaveBeenCalledWith('1.2.3', 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip');
         expect(exec.exec).toHaveBeenCalledWith('ls', ['-l', 'modules']);
         expect(exec.exec).toHaveBeenCalledWith('zip', ['-j', 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip', 'modules/foo.so']);
@@ -527,19 +549,44 @@ describe('main', () => {
             extPackageName: 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip',
         });
         vi.spyOn(action, 'buildExtension').mockResolvedValue();
+        vi.spyOn(action, 'uploadBuildArtifact').mockResolvedValue();
         vi.spyOn(action, 'uploadReleaseAsset').mockResolvedValue();
         vi.spyOn(exec, 'exec').mockResolvedValue();
         core.getInput.mockImplementation((name) => {
             if (name === 'build-path') return 'src/php/ext/grpc';
             return '';
         });
+        core.getBooleanInput.mockReturnValue(true);
 
         await action.main();
 
         expect(action.buildExtension).toHaveBeenCalled();
+        expect(action.uploadBuildArtifact).toHaveBeenCalledWith('php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip');
         expect(action.uploadReleaseAsset).toHaveBeenCalledWith('1.2.3', 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip');
         expect(exec.exec).toHaveBeenCalledWith('ls', ['-l', 'src/php/ext/grpc/modules']);
         expect(exec.exec).toHaveBeenCalledWith('zip', ['-j', 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip', 'src/php/ext/grpc/modules/foo.so']);
         expect(core.setOutput).toHaveBeenCalledWith('package-path', 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip');
+    });
+
+    test('main does not upload build artifact when upload-artifacts is disabled', async () => {
+        vi.spyOn(action, 'extensionDetails').mockResolvedValue({
+            releaseTag: '1.2.3',
+            extSoFile: 'foo.so',
+            extPackageName: 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip',
+        });
+        vi.spyOn(action, 'buildExtension').mockResolvedValue();
+        vi.spyOn(action, 'uploadBuildArtifact').mockResolvedValue();
+        vi.spyOn(action, 'uploadReleaseAsset').mockResolvedValue();
+        vi.spyOn(exec, 'exec').mockResolvedValue();
+        core.getInput.mockImplementation((name) => {
+            if (name === 'build-path') return '.';
+            return '';
+        });
+        core.getBooleanInput.mockReturnValue(false);
+
+        await action.main();
+
+        expect(action.uploadBuildArtifact).not.toHaveBeenCalled();
+        expect(action.uploadReleaseAsset).toHaveBeenCalledWith('1.2.3', 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip');
     });
 });

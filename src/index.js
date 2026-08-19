@@ -1,3 +1,4 @@
+import artifact from "@actions/artifact";
 import * as core from "@actions/core";
 import * as exec from "@actions/exec";
 import * as github from "@actions/github";
@@ -148,6 +149,11 @@ async function determineZendThreadSafeMode(phpBinary) {
         .trim();
 }
 
+async function uploadBuildArtifact(packageFilename) {
+    core.info("Uploading build artifact...");
+    await artifact.uploadArtifact(packageFilename, [packageFilename], ".");
+}
+
 async function uploadReleaseAsset(releaseTag, packageFilename) {
     core.info("Uploading release asset...");
     const githubToken = core.getInput("github-token");
@@ -207,6 +213,9 @@ async function main() {
 
     await exec.exec("zip", ["-j", extPackageName, path.join(modulesDir, extSoFile)]);
 
+    if (core.getBooleanInput("upload-artifacts")) {
+        await action.uploadBuildArtifact(extPackageName);
+    }
     await action.uploadReleaseAsset(releaseTag, extPackageName);
 
     core.setOutput("package-path", extPackageName);
@@ -222,6 +231,7 @@ const action = {
     determinePhpBinary,
     determinePhpDebugMode,
     determineZendThreadSafeMode,
+    uploadBuildArtifact,
     uploadReleaseAsset,
     extensionDetails,
     main,
@@ -237,6 +247,7 @@ export {
     determinePhpBinary,
     determinePhpDebugMode,
     determineZendThreadSafeMode,
+    uploadBuildArtifact,
     uploadReleaseAsset,
     extensionDetails,
     main,

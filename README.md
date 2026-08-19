@@ -31,13 +31,14 @@ with:
 
 ### Inputs
 
-| Name               | Description                                                                                     | Required | Default   |
-|--------------------|-------------------------------------------------------------------------------------------------|----------|-----------|
-| `release-tag`      | The tag to use when building the extension; there must be an existing draft release for the tag | `true`   | -         |
-| `github-token`     | The GitHub token to use. Usually `${{ secrets.GITHUB_TOKEN }}` would be fine for most cases.    | `true`   | -         |
-| `configure-flags`  | If you need to pass additional flags to the `./configure` command, specify them here            | `false`  | `''`      |
-| `build-path`       | Path to the extension source directory containing `config.m4`, relative to repo root            | `false`  | `'.'`     |
-| `upload-artifacts` | Whether to upload the generated `.zip` as a workflow build artifact                             | `false`  | `'false'` |
+| Name               | Description                                                                                      | Required | Default   |
+|--------------------|--------------------------------------------------------------------------------------------------|----------|-----------|
+| `release-tag`      | The tag to use when building the extension; there must be an existing draft release for the tag  | `true`   | -         |
+| `create-release`   | Create the release (as a draft) for `release-tag` if it doesn't already exist                    | `false`  | `'false'` |
+| `github-token`     | The GitHub token to use. Usually `${{ secrets.GITHUB_TOKEN }}` would be fine for most cases.     | `true`   | -         |
+| `configure-flags`  | If you need to pass additional flags to the `./configure` command, specify them here             | `false`  | `''`      |
+| `build-path`       | Path to the extension source directory containing `config.m4`, relative to repo root             | `false`  | `'.'`     |
+| `upload-artifacts` | Whether to upload the generated `.zip` as a workflow build artifact                              | `false`  | `'false'` |
 
 ### Outputs
 
@@ -50,7 +51,10 @@ with:
 This use case is for a scenario where:
 
  - The action triggers when you push any tag
- - It will create a draft release
+ - It will build for a matrix of PHP versions, architectures and thread-safety modes,
+   creating the draft release the first time it's needed (it's safe for every matrix
+   job to do this - only one release is ever created, even if many jobs race to create
+   it at the same time)
  - It will then check out your extension, set up the required PHP version, build it, and upload to the draft release
 
 You would then have to navigate to the draft release and publish it.
@@ -67,27 +71,7 @@ permissions:
   contents: read
 
 jobs:
-  # This first step will create a *draft* release based on the tag name. In the
-  # case where immutable releases are enabled, the release MUST be in draft
-  # mode, otherwise we would not be able to attach the release assets (since
-  # the release is immutable once published.
-  create-draft-release:
-    runs-on: ubuntu-latest
-    permissions:
-      # contents:write is required to create the draft release
-      contents: write
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-tags: 'true'
-          ref: ${{ github.ref }}
-      - name: Create draft release from tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" --title "${{ github.ref_name }}" --draft --notes-from-tag
-
   add-pie-binaries:
-    needs: [ create-draft-release ]
     runs-on: ${{ matrix.operating-system }}
     # The matrix defines which combination of binaries you want to build
     strategy:
@@ -103,7 +87,7 @@ jobs:
           - ts
           - nts
     permissions:
-      # contents:write is required to upload to the release assets
+      # contents:write is required to create the release and upload the release assets
       contents: write
     steps:
       - name: Checkout
@@ -117,13 +101,14 @@ jobs:
         env:
           phpts: ${{ matrix.zts-mode }}
 
-      # Finally, this invokes the action, which builds the extension, creates
-      # the archive with the correct naming, and uploads it to the release for
-      # the given tag name
+      # This invokes the action, which builds the extension, creates the archive with
+      # the correct naming, creates the draft release for the tag if it doesn't already
+      # exist, and uploads it to the release for the given tag name
       - name: Build and release
         id: php-ext-binary-builder
         uses: php/pie-ext-binary-builder@0.0.2
         with:
           release-tag: ${{ github.ref_name }}
+          create-release: 'true'
           github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
